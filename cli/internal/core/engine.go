@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/vercel/turbo/cli/internal/graph"
 	"github.com/vercel/turbo/cli/internal/util"
 
 	"github.com/pyr-sh/dag"
@@ -17,6 +18,8 @@ type Task struct {
 	Deps util.Set
 	// TopoDeps are dependencies across packages within the same topological graph (e.g. parent `build` -> child `build`) */
 	TopoDeps util.Set
+	// Persistent is whether this task is persistent or not. We need this information to validate TopoDeps graph
+	Persistent bool
 }
 
 type Visitor = func(taskID string) error
@@ -84,20 +87,26 @@ type EngineExecutionOptions struct {
 func (e *Engine) Execute(visitor Visitor, opts EngineExecutionOptions) []error {
 	var sema = util.NewSemaphore(opts.Concurrency)
 	return e.TaskGraph.Walk(func(v dag.Vertex) error {
+		// Each vertex in the graoh is a taskID (package#task format)
+		taskID := dag.VertexName(v)
+
 		// Always return if it is the root node
-		if strings.Contains(dag.VertexName(v), ROOT_NODE_NAME) {
+		if strings.Contains(taskID, ROOT_NODE_NAME) {
 			return nil
 		}
+
 		// Acquire the semaphore unless parallel
 		if !opts.Parallel {
 			sema.Acquire()
 			defer sema.Release()
 		}
-		return visitor(dag.VertexName(v))
+
+		return visitor(taskID)
 	})
 }
 
-func (e *Engine) getTaskDefinition(pkg string, taskName string, taskID string) (*Task, error) {
+// GetTaskDefinition looks up a task in a package, or the fallback Task based on just the name.
+func (e *Engine) GetTaskDefinition(pkg string, taskName string, taskID string) (*Task, error) {
 	if task, ok := e.Tasks[taskID]; ok {
 		return task, nil
 	}
@@ -115,12 +124,13 @@ func (e *Engine) generateTaskGraph(pkgs []string, taskNames []string, tasksOnly 
 		for _, taskName := range taskNames {
 			if !isRootPkg || e.rootEnabledTasks.Includes(taskName) {
 				taskID := util.GetTaskId(pkg, taskName)
-				if _, err := e.getTaskDefinition(pkg, taskName, taskID); err != nil {
+				if _, err := e.GetTaskDefinition(pkg, taskName, taskID); err != nil {
 					// Initial, non-package tasks are not required to exist, as long as some
 					// package in the list packages defines it as a package-task. Dependencies
 					// *are* required to have a definition.
 					continue
 				}
+
 				traversalQueue = append(traversalQueue, taskID)
 			}
 		}
@@ -128,7 +138,9 @@ func (e *Engine) generateTaskGraph(pkgs []string, taskNames []string, tasksOnly 
 
 	visited := make(util.Set)
 
+	// Things get appended to traversalQueue inside this loop, so we use the len() check instead of range.
 	for len(traversalQueue) > 0 {
+		// pop off the first item from the traversalQueue
 		taskID := traversalQueue[0]
 		traversalQueue = traversalQueue[1:]
 
@@ -136,7 +148,8 @@ func (e *Engine) generateTaskGraph(pkgs []string, taskNames []string, tasksOnly 
 		if pkg == util.RootPkgName && !e.rootEnabledTasks.Includes(taskName) {
 			return fmt.Errorf("%v needs an entry in turbo.json before it can be depended on because it is a task run from the root package", taskID)
 		}
-		task, err := e.getTaskDefinition(pkg, taskName, taskID)
+		task, err := e.GetTaskDefinition(pkg, taskName, taskID)
+
 		if err != nil {
 			return err
 		}
@@ -218,6 +231,7 @@ func (e *Engine) generateTaskGraph(pkgs []string, taskNames []string, tasksOnly 
 			}
 		}
 
+		// Add the root node into the graph
 		if !hasDeps && !hasTopoDeps && !hasPackageTaskDeps {
 			e.TaskGraph.Add(ROOT_NODE_NAME)
 			e.TaskGraph.Add(toTaskID)
@@ -256,4 +270,67 @@ func (e *Engine) AddDep(fromTaskID string, toTaskID string) error {
 	e.PackageTaskDeps[toTaskID] = append(e.PackageTaskDeps[toTaskID], fromTaskID)
 
 	return nil
+}
+
+// ValidatePersistentDependencies checks if any task dependsOn persistent tasks and throws
+// an error if that task is actually implemented
+func (e *Engine) ValidatePersistentDependencies(graph *graph.CompleteGraph) error {
+	var validationError error
+
+	errs := e.TaskGraph.Walk(func(v dag.Vertex) error {
+		vertexName := dag.VertexName(v) // vertexName is a taskID
+
+		// No need to check the root node if that's where we are.
+		if strings.Contains(vertexName, ROOT_NODE_NAME) {
+			return nil
+		}
+
+		currentPackageName, currentTaskName := util.GetPackageTaskFromId(vertexName)
+
+		// For each "downEdge" (i.e. each task that _this_ task dependsOn)
+		// check if the downEdge is a Persistent task, and if it actually has the script implemented
+		// in that package's package.json
+		for dep := range e.TaskGraph.DownEdges(vertexName) {
+			depTaskID := dep.(string)
+			// No need to check the root node
+			if strings.Contains(depTaskID, ROOT_NODE_NAME) {
+				return nil
+			}
+
+			// Parse the taskID of this dependency task
+			packageName, taskName := util.GetPackageTaskFromId(depTaskID)
+
+			// Get the Task Definition so we can check if it is Persistent
+			depTaskDefinition, taskExists := e.GetTaskDefinition(packageName, taskName, depTaskID)
+			if taskExists != nil {
+				return fmt.Errorf("Cannot find task definition for %v in package %v", depTaskID, packageName)
+			}
+
+			// Get information about the package
+			pkg, pkgExists := graph.PackageInfos[packageName]
+			if !pkgExists {
+				return fmt.Errorf("Cannot find package %v", packageName)
+			}
+			_, hasScript := pkg.Scripts[taskName]
+
+			// If both conditions are true set a value and break out
+			if depTaskDefinition.Persistent && hasScript {
+				validationError = fmt.Errorf(
+					"\"%s\" is a persistent task, \"%s\" cannot depend on it",
+					util.GetTaskId(packageName, taskName),
+					util.GetTaskId(currentPackageName, currentTaskName),
+				)
+				break
+			}
+		}
+
+		return nil
+	})
+
+	for _, err := range errs {
+		return fmt.Errorf("Validation failed: %v", err)
+	}
+
+	// May or may not be set (could be nil)
+	return validationError
 }
