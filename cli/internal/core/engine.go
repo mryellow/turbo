@@ -277,6 +277,10 @@ func (e *Engine) AddDep(fromTaskID string, toTaskID string) error {
 func (e *Engine) ValidatePersistentDependencies(graph *graph.CompleteGraph) error {
 	var validationError error
 
+	// Adding in a lock because otherwise walking the graph can introduce a data race
+	// (reproducible with `go test -race`)
+	var sema = util.NewSemaphore(1)
+
 	errs := e.TaskGraph.Walk(func(v dag.Vertex) error {
 		vertexName := dag.VertexName(v) // vertexName is a taskID
 
@@ -284,6 +288,10 @@ func (e *Engine) ValidatePersistentDependencies(graph *graph.CompleteGraph) erro
 		if strings.Contains(vertexName, ROOT_NODE_NAME) {
 			return nil
 		}
+
+		// Aquire a lock, because otherwise walking this group
+		sema.Acquire()
+		defer sema.Release()
 
 		currentPackageName, currentTaskName := util.GetPackageTaskFromId(vertexName)
 
@@ -313,13 +321,14 @@ func (e *Engine) ValidatePersistentDependencies(graph *graph.CompleteGraph) erro
 			}
 			_, hasScript := pkg.Scripts[taskName]
 
-			// If both conditions are true set a value and break out
+			// If both conditions are true set a value and break out of checking the dependencies
 			if depTaskDefinition.Persistent && hasScript {
 				validationError = fmt.Errorf(
 					"\"%s\" is a persistent task, \"%s\" cannot depend on it",
 					util.GetTaskId(packageName, taskName),
 					util.GetTaskId(currentPackageName, currentTaskName),
 				)
+
 				break
 			}
 		}
