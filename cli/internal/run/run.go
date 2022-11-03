@@ -356,7 +356,6 @@ func (r *run) runOperation(ctx gocontext.Context, g *graph.CompleteGraph, rs *ru
 			r.base.UI.Output(fmt.Sprintf(ui.Dim("• Packages in scope: %v"), strings.Join(packagesInScope, ", ")))
 			r.base.UI.Output(fmt.Sprintf("%s %s %s", ui.Dim("• Running"), ui.Dim(ui.Bold(strings.Join(rs.Targets, ", "))), ui.Dim(fmt.Sprintf("in %v packages", rs.FilteredPkgs.Len()))))
 		}
-
 		return r.executeTasks(ctx, g, rs, engine, packageManager, tracker, startAt)
 	}
 	return nil

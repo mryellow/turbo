@@ -129,7 +129,6 @@ func (e *Engine) generateTaskGraph(pkgs []string, taskNames []string, tasksOnly 
 					// *are* required to have a definition.
 					continue
 				}
-
 				traversalQueue = append(traversalQueue, taskID)
 			}
 		}
@@ -148,7 +147,6 @@ func (e *Engine) generateTaskGraph(pkgs []string, taskNames []string, tasksOnly 
 			return fmt.Errorf("%v needs an entry in turbo.json before it can be depended on because it is a task run from the root package", taskID)
 		}
 		task, err := e.getTaskDefinition(pkg, taskName, taskID)
-
 		if err != nil {
 			return err
 		}
