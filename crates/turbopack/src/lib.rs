@@ -424,7 +424,7 @@ async fn emit_aggregated_assets(
 #[turbo_tasks::function(cycle)]
 async fn emit_assets_recursive(asset: AssetVc) -> Result<()> {
     let assets_set = all_referenced_assets(asset);
-    emit_asset(asset);
+    emit_asset(asset).await?;
     for asset in assets_set.await?.iter() {
         emit_assets_recursive(*asset);
     }
