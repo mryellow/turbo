@@ -476,12 +476,9 @@ func buildTaskGraphEngine(g *graph.CompleteGraph, rs *runSpec) (*core.Engine, er
 		isPackageTask := util.IsPackageTask(taskName)
 
 		for _, dependency := range taskDefinition.TaskDependencies {
-			depTaskIsPackageTask := util.IsPackageTask(dependency)
-			// If both tasks are package tasks, add the relationship to the engine.
-			// Otherwise, if it's a dependency like `dependsOn: ['whatever']`
-			// add the dependency to the task itself.
-			if isPackageTask && depTaskIsPackageTask {
-				if err := engine.AddDep(dependency, taskName); err != nil {
+			if isPackageTask && util.IsPackageTask(dependency) {
+				err := engine.AddDep(dependency, taskName)
+				if err != nil {
 					return nil, err
 				}
 			} else {
@@ -489,9 +486,10 @@ func buildTaskGraphEngine(g *graph.CompleteGraph, rs *runSpec) (*core.Engine, er
 			}
 		}
 
+		topoDeps := util.SetFromStrings(taskDefinition.TopologicalDependencies)
 		engine.AddTask(&core.Task{
 			Name:       taskName,
-			TopoDeps:   util.SetFromStrings(taskDefinition.TopologicalDependencies),
+			TopoDeps:   topoDeps,
 			Deps:       deps,
 			Persistent: taskDefinition.Persistent,
 		})
