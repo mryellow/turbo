@@ -495,13 +495,11 @@ func buildTaskGraphEngine(g *graph.CompleteGraph, rs *runSpec) (*core.Engine, er
 		})
 	}
 
-	engineOptions := &core.EngineBuildingOptions{
+	if err := engine.Prepare(&core.EngineBuildingOptions{
 		Packages:  rs.FilteredPkgs.UnsafeListOfStrings(),
 		TaskNames: rs.Targets,
 		TasksOnly: rs.Opts.runOpts.only,
-	}
-
-	if err := engine.Prepare(engineOptions); err != nil {
+	}); err != nil {
 		return nil, err
 	}
 
